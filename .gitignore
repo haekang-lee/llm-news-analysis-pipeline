@@ -1,0 +1,9 @@
+# .gitignore
+__pycache__/
+*.parquet
+*.parquet.tmp
+temp/
+output/
+archive/
+.vscode/
+test/
