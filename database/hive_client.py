@@ -1,7 +1,11 @@
+import logging
+
 import jaydebeapi
 import pandas as pd
 import numpy as np
 from omegaconf import DictConfig
+
+logger = logging.getLogger(__name__)
 
 
 def _get_connection(cfg: DictConfig):
@@ -30,7 +34,7 @@ def execute_ddl(cfg: DictConfig, ddl: str) -> None:
     cursor = conn.cursor()
     try:
         cursor.execute(ddl)
-        print("[완료] DDL 실행 성공")
+        logger.info("DDL 실행 성공")
     finally:
         cursor.close()
         conn.close()
@@ -88,11 +92,11 @@ def insert_dataframe(
 
             if verbose:
                 end = min(start + batch_size, total)
-                print(f"  [{end:>7,} / {total:,}] 삽입 완료")
+                logger.info("[%s / %s] 삽입 완료", f"{end:,}", f"{total:,}")
 
-        print(f"[완료] 총 {total:,}건 삽입 성공 → {table}")
+        logger.info("총 %s건 삽입 성공 → %s", f"{total:,}", table)
     except Exception as e:
-        print(f"[에러] INSERT 실패: {e}")
+        logger.error("INSERT 실패: %s", e)
         raise
     finally:
         cursor.close()
@@ -121,6 +125,6 @@ def insert_dataframe_with_id(
     df.insert(0, id_column, range(max_id + 1, max_id + 1 + len(df)))
 
     if verbose:
-        print(f"  현재 MAX({id_column}) = {max_id:,}  →  {max_id + 1:,} 부터 부여")
+        logger.info("현재 MAX(%s) = %s  →  %s 부터 부여", id_column, f"{max_id:,}", f"{max_id + 1:,}")
 
     insert_dataframe(cfg, df, table=table, batch_size=batch_size, verbose=verbose, partition_col=partition_col)
