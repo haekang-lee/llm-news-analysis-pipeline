@@ -8,3 +8,6 @@ archive/
 .vscode/
 test/
 conf/
+
+# Prompts containing internal business logic
+prompts/news_prompt.py
