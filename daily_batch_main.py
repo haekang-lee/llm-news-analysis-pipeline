@@ -222,12 +222,15 @@ async def run_daily_batch():
             similarity_threshold=SIMILARITY_THRESHOLD
         )
 
-        # 필터링
-        final_df = mapped_df[
-            (mapped_df["classification"] == "essential") &
-            (mapped_df["cust_no"].notna()) &
-            (mapped_df["cust_no"] != "")
-        ].copy()
+        # 필터링 (매핑 결과 없으면 컬럼이 없는 빈 DF가 반환됨)
+        if mapped_df.empty:
+            final_df = mapped_df.copy()
+        else:
+            final_df = mapped_df[
+                (mapped_df["classification"] == "essential") &
+                (mapped_df["cust_no"].notna()) &
+                (mapped_df["cust_no"] != "")
+            ].copy()
 
         chunk_mapped = len(mapped_df) if mapped_df is not None and not mapped_df.empty else 0
         chunk_insert = len(final_df)
