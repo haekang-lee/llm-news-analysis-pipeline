@@ -33,6 +33,7 @@ def get_last_processed_info(path: str = "output/checkpoint/last_seq.json") -> tu
 
 def save_last_processed_info(seq: int, part_basc_dt: str, path: str = "output/checkpoint/last_seq.json"):
     """마지막으로 처리한 seq 번호와 파티션 날짜를 저장"""
-    with open(path, 'w', encoding='utf-8') as f:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
         json.dump({"last_seq": seq, "last_part_basc_dt": part_basc_dt}, f)
 
