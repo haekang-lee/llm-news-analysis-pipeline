@@ -22,21 +22,14 @@ from log import setup_logging, cleanup_old_output_dirs
 
 logger = logging.getLogger("news_data")
 
-from database.hive_client import fetch_data, insert_dataframe_with_id
+from database.hive_client import fetch_data
+from database.parquet_store import append_to_target_parquet, resolve_target_parquet_path
+from database.schema import TARGET_DATA_COLUMNS
 from queries.sql_queries import get_daily_news_data, get_companies_data
 from pipelines.common.checkpoint import get_last_processed_info, save_last_processed_info, ensure_dirs, load_checkpoint, save_checkpoint
+from pipelines.common.paths import path_from_cfg
 from pipelines.news.extraction import process_chunk
 from pipelines.company.mapping_service import build_or_load_company_vector_db, process_one_chunk, normalize_company_name
-
-# ── 설정 ──────────────────────────────────────────────────────────────────────
-DAILY_OUTPUT_DIR  = "output/daily_batch"
-COMPANY_INFO_PATH = "database/company_info.parquet"
-CONCURRENT_LIMIT  = 50
-SIMILARITY_THRESHOLD = 0.9
-CHUNK_SIZE        = 1000
-
-# 디버깅 모드 (True: DB 적재 직전에 결과를 화면에 출력하고 종료)
-DRY_RUN = False
 
 # parquet 컬럼명 → Hive DDL 컬럼명 매핑
 COLUMN_RENAME = {
@@ -59,6 +52,7 @@ COLUMNS = [
 ]
 
 
+
 def run_dry_run(final_df: pd.DataFrame, chunk_idx: int) -> None:
     """DRY_RUN 모드: DB 적재 없이 결과를 로그로 출력하고 종료."""
     import sys
@@ -78,27 +72,30 @@ def run_dry_run(final_df: pd.DataFrame, chunk_idx: int) -> None:
             logger.warning("\n%s", sample_df[preview_cols].to_string(index=False))
         logger.warning("전체 컬럼: %s", list(sample_df.columns))
 
-    logger.warning("DRY_RUN=False 로 변경 후 재실행하세요.")
+    logger.warning("batch.dry_run=false 로 변경 후 재실행하세요.")
     sys.exit(0)
 
 
 async def run_daily_batch():
-    start_time = time.time()
-    today_str = datetime.now().strftime("%Y%m%d")
-    setup_logging(today_str=today_str)
-    logger.info("========== 일배치 시작 (%s) ==========", today_str)
-    cleanup_old_output_dirs(DAILY_OUTPUT_DIR)
-
-    # 1. 설정 로드 및 디렉토리 준비
     config_dir = os.path.abspath("conf")
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="config")
 
-    target_table      = cfg.tables.target
-    news_source_table = cfg.tables.news_source
-    companies_table   = cfg.tables.companies
+    daily_output_dir = path_from_cfg(cfg, "daily_output_dir")
+    company_info_path = path_from_cfg(cfg, "company_info_parquet")
+    last_seq_path = path_from_cfg(cfg, "last_seq_file")
+    log_dir = path_from_cfg(cfg, "log_dir")
 
-    today_dir = os.path.join(DAILY_OUTPUT_DIR, today_str)
+    start_time = time.time()
+    today_str = datetime.now().strftime("%Y%m%d")
+    setup_logging(log_dir=log_dir, today_str=today_str)
+    logger.info("========== 일배치 시작 (%s) ==========", today_str)
+    cleanup_old_output_dirs(daily_output_dir)
+
+    news_source_table = cfg.tables.news_source
+    target_parquet_path = resolve_target_parquet_path(cfg)
+
+    today_dir = os.path.join(daily_output_dir, today_str)
     raw_parquet_path = os.path.join(today_dir, f"raw_news_{today_str}.parquet")
     extracted_parts_dir = os.path.join(today_dir, "extracted_parts")
     mapped_parts_dir = os.path.join(today_dir, "mapped_parts")
@@ -107,7 +104,7 @@ async def run_daily_batch():
     ensure_dirs(today_dir, extracted_parts_dir, mapped_parts_dir)
 
     # 2. 신규 데이터 덤프 (DB -> 로컬 파케이)
-    last_seq, last_part_basc_dt = get_last_processed_info()
+    last_seq, last_part_basc_dt = get_last_processed_info(last_seq_path)
     logger.info("마지막 처리 seq: %s (파티션: %s)", f"{last_seq:,}", last_part_basc_dt)
 
     dump_size = 0
@@ -145,7 +142,9 @@ async def run_daily_batch():
     available_cols = ["seq", "site_name", "basc_dt", "title", "content", "doc_sentiment"]
 
     total_extracted_news = 0
-    for chunk_idx, record_batch in enumerate(parquet_file.iter_batches(batch_size=CHUNK_SIZE, columns=available_cols)):
+    for chunk_idx, record_batch in enumerate(
+        parquet_file.iter_batches(batch_size=cfg.batch.chunk_size, columns=available_cols)
+    ):
         if chunk_idx < start_chunk_idx:
             continue
 
@@ -156,7 +155,7 @@ async def run_daily_batch():
             cfg=cfg,
             chunk_df=chunk_df,
             chunk_idx=chunk_idx,
-            concurrent_limit=CONCURRENT_LIMIT,
+            concurrent_limit=cfg.batch.concurrent_limit,
             output_dir=extracted_parts_dir,
             save_parquet=True
         )
@@ -179,7 +178,7 @@ async def run_daily_batch():
     logger.info("[2단계] 기업 매핑 및 DB 적재 시작...")
     logger.info("최신 기업 데이터 로드 중...")
     # companies_df = fetch_data(cfg, get_companies_data(table=companies_table))
-    companies_df = pd.read_parquet(COMPANY_INFO_PATH, engine="pyarrow")
+    companies_df = pd.read_parquet(company_info_path, engine="pyarrow")
     companies_df_copy = companies_df.copy()
     # 매핑을 위해 clean_cust_nm 컬럼 추가
     companies_df["clean_cust_nm"] = companies_df["cust_nm"].apply(normalize_company_name)
@@ -219,7 +218,7 @@ async def run_daily_batch():
             companies_df_copy=companies_df_copy,
             vector_db=vector_db,
             embedding_model=embedding_model,
-            similarity_threshold=SIMILARITY_THRESHOLD
+            similarity_threshold=cfg.batch.similarity_threshold,
         )
 
         # 필터링 (매핑 결과 없으면 컬럼이 없는 빈 DF가 반환됨)
@@ -241,17 +240,18 @@ async def run_daily_batch():
         mapped_file = os.path.join(mapped_parts_dir, f"mapped_part_{chunk_idx:05d}.parquet")
         final_df.to_parquet(mapped_file, index=False)
 
-        if DRY_RUN:
+        if cfg.batch.dry_run:
             run_dry_run(final_df, chunk_idx)
 
-        # DB INSERT
+        # parquet 원본에 append
         if not final_df.empty:
-            final_df = final_df[COLUMNS].rename(columns=COLUMN_RENAME)
-            final_df["seq"] = final_df["seq"].astype("Int64")
+            to_append = final_df[COLUMNS].rename(columns=COLUMN_RENAME)
+            to_append = to_append[TARGET_DATA_COLUMNS]
+            to_append["seq"] = to_append["seq"].astype("Int64")
 
-            insert_dataframe_with_id(cfg, final_df, table=target_table, batch_size=1000, verbose=False)
-            total_inserted += chunk_insert
-            logger.info("[적재완료] 청크 %d — DB INSERT 성공: %s건", chunk_idx, f"{chunk_insert:,}")
+            appended = append_to_target_parquet(target_parquet_path, to_append)
+            total_inserted += appended
+            logger.info("[적재완료] 청크 %d — parquet append 성공: %s건 → %s", chunk_idx, f"{appended:,}", target_parquet_path)
         else:
             logger.info("[적재] 청크 %d — 적재 대상 없음", chunk_idx)
 
@@ -259,7 +259,7 @@ async def run_daily_batch():
         save_checkpoint(checkpoint_file, checkpoint)
 
     # 5. 모든 처리가 끝난 후 seq 업데이트
-    save_last_processed_info(new_max_seq, new_max_part_dt)
+    save_last_processed_info(new_max_seq, new_max_part_dt, last_seq_path)
     logger.info("last_seq 업데이트 완료: %s (파티션: %s)", f"{new_max_seq:,}", new_max_part_dt)
 
     elapsed = time.time() - start_time
@@ -273,7 +273,7 @@ async def run_daily_batch():
         "덤프 데이터 크기:", f"{dump_size:,}",
         "기업명 추출 성공:", f"{total_extracted_news:,}",
         "기업 매핑 성공:", f"{total_mapped:,}",
-        "DB INSERT 성공:", f"{total_inserted:,}",
+        "parquet append 성공:", f"{total_inserted:,}",
         "소요시간:", elapsed,
     )
 
