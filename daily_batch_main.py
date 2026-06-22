@@ -22,14 +22,15 @@ from log import setup_logging, cleanup_old_output_dirs
 
 logger = logging.getLogger("news_data")
 
-from database.hive_client import fetch_data
+from database.news_source import load_recent_news_from_parquet
 from database.parquet_store import append_to_target_parquet, resolve_target_parquet_path
+from database.sqlite_store import export_parquet_to_sqlite
 from database.schema import TARGET_DATA_COLUMNS
-from queries.sql_queries import get_daily_news_data, get_companies_data
 from pipelines.common.checkpoint import get_last_processed_info, save_last_processed_info, ensure_dirs, load_checkpoint, save_checkpoint
-from pipelines.common.paths import path_from_cfg
+from pipelines.common.paths import path_from_cfg, project_root
 from pipelines.news.extraction import process_chunk
 from pipelines.company.mapping_service import build_or_load_company_vector_db, process_one_chunk, normalize_company_name
+from pipelines.company.preprocess import keep_latest_per_cust_no, rename_companies_df_columns
 
 # parquet 컬럼명 → Hive DDL 컬럼명 매핑
 COLUMN_RENAME = {
@@ -77,7 +78,9 @@ def run_dry_run(final_df: pd.DataFrame, chunk_idx: int) -> None:
 
 
 async def run_daily_batch():
-    config_dir = os.path.abspath("conf")
+    # CWD가 아니라 이 파일 위치(프로젝트 루트) 기준으로 conf를 찾는다.
+    # 다른 폴더/워크플로우에서 import 해서 호출해도 동작하도록.
+    config_dir = os.path.join(project_root(), "conf")
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         cfg = compose(config_name="config")
 
@@ -92,7 +95,7 @@ async def run_daily_batch():
     logger.info("========== 일배치 시작 (%s) ==========", today_str)
     cleanup_old_output_dirs(daily_output_dir)
 
-    news_source_table = cfg.tables.news_source
+    news_source_parquet = path_from_cfg(cfg, "news_source_parquet")
     target_parquet_path = resolve_target_parquet_path(cfg)
 
     today_dir = os.path.join(daily_output_dir, today_str)
@@ -103,20 +106,17 @@ async def run_daily_batch():
 
     ensure_dirs(today_dir, extracted_parts_dir, mapped_parts_dir)
 
-    # 2. 신규 데이터 덤프 (DB -> 로컬 파케이)
+    # 2. 신규 데이터 덤프 (원천 parquet -> 로컬 파케이, 증분 필터 적용)
     last_seq, last_part_basc_dt = get_last_processed_info(last_seq_path)
     logger.info("마지막 처리 seq: %s (파티션: %s)", f"{last_seq:,}", last_part_basc_dt)
 
     dump_size = 0
     if not os.path.exists(raw_parquet_path):
-        logger.info("신규 뉴스 데이터 DB에서 조회 중...")
-        # 테스트용으로 3000건만 가져오려면 아래 쿼리에 limit=3000 을 추가
-        # query = get_daily_news_data(last_seq, last_part_basc_dt, source_table=news_source_table, limit=3000)
-        query = get_daily_news_data(last_seq, last_part_basc_dt, source_table=news_source_table)
-        news_df = fetch_data(cfg, query)
+        logger.info("신규 뉴스 데이터 원천 parquet에서 로드 중: %s", news_source_parquet)
+        news_df = load_recent_news_from_parquet(news_source_parquet, last_seq, last_part_basc_dt)
 
         if news_df.empty:
-            logger.info("신규 뉴스가 없습니다. 배치를 종료합니다.")
+            logger.info("신규 뉴스가 없습니다 (증분 필터 결과 0건). 배치를 종료합니다.")
             return
 
         dump_size = len(news_df)
@@ -179,6 +179,8 @@ async def run_daily_batch():
     logger.info("최신 기업 데이터 로드 중...")
     # companies_df = fetch_data(cfg, get_companies_data(table=companies_table))
     companies_df = pd.read_parquet(company_info_path, engine="pyarrow")
+    companies_df = keep_latest_per_cust_no(companies_df)
+    companies_df = rename_companies_df_columns(companies_df)
     companies_df_copy = companies_df.copy()
     # 매핑을 위해 clean_cust_nm 컬럼 추가
     companies_df["clean_cust_nm"] = companies_df["cust_nm"].apply(normalize_company_name)
@@ -262,6 +264,10 @@ async def run_daily_batch():
     save_last_processed_info(new_max_seq, new_max_part_dt, last_seq_path)
     logger.info("last_seq 업데이트 완료: %s (파티션: %s)", f"{new_max_seq:,}", new_max_part_dt)
 
+    # 6. 공유 공간 SQLite export (output/target parquet → .db)
+    target_sqlite_path = path_from_cfg(cfg, "target_sqlite_path")
+    export_parquet_to_sqlite(target_parquet_path, target_sqlite_path)
+
     elapsed = time.time() - start_time
     logger.info(
         "========== 일배치 종료 ==========\n"
@@ -277,5 +283,10 @@ async def run_daily_batch():
         "소요시간:", elapsed,
     )
 
-if __name__ == "__main__":
+def main():
+    """동기 진입점. 외부(워크플로우)에서 import 해서 호출하는 용도."""
     asyncio.run(run_daily_batch())
+
+
+if __name__ == "__main__":
+    main()
