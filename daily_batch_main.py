@@ -90,7 +90,10 @@ async def run_daily_batch():
     log_dir = path_from_cfg(cfg, "log_dir")
 
     start_time = time.time()
-    today_str = datetime.now().strftime("%Y%m%d")
+    # 기본은 오늘 날짜. BATCH_RUN_DATE(YYYYMMDD) 환경변수로 덮어쓰면
+    # 해당 날짜 폴더(output/daily_batch/<날짜>)를 그대로 이어서 처리한다.
+    # (예: 어제 추출까지 끝났는데 매핑에서 실패한 run을 LLM 재호출 없이 재개)
+    today_str = os.environ.get("BATCH_RUN_DATE") or datetime.now().strftime("%Y%m%d")
     setup_logging(log_dir=log_dir, today_str=today_str)
     logger.info("========== 일배치 시작 (%s) ==========", today_str)
     cleanup_old_output_dirs(daily_output_dir)
@@ -186,7 +189,8 @@ async def run_daily_batch():
     companies_df["clean_cust_nm"] = companies_df["cust_nm"].apply(normalize_company_name)
 
     logger.info("벡터 DB 로드/생성 중...")
-    vector_db_path = os.path.join(today_dir, "company_vector_db")
+    # 날짜 무관 캐시: 회사 마스터가 동일하면 매일 재임베딩하지 않고 재사용 (CPU에서 특히 중요)
+    vector_db_path = path_from_cfg(cfg, "vector_db_dir")
     vector_db, embedding_model = build_or_load_company_vector_db(cfg, companies_df, vector_db_path)
 
     start_map_idx = checkpoint["last_mapped_chunk"] + 1
