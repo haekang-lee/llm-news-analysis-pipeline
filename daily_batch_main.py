@@ -13,7 +13,6 @@ warnings.filterwarnings("ignore")
 
 # 외부 라이브러리 로거 레벨 조정 (API 호출 로그 등 불필요한 INFO 로그 숨김)
 logging.getLogger("torchvision").setLevel(logging.ERROR)
-logging.getLogger("jaydebeapi").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
@@ -22,7 +21,8 @@ from log import setup_logging, cleanup_old_output_dirs
 
 logger = logging.getLogger("news_data")
 
-from database.news_source import load_recent_news_from_parquet
+from database.news_source import load_recent_news
+from database.company_source import load_company_info
 from database.parquet_store import append_to_target_parquet, resolve_target_parquet_path
 from database.sqlite_store import export_parquet_to_sqlite
 from database.schema import TARGET_DATA_COLUMNS
@@ -85,7 +85,7 @@ async def run_daily_batch():
         cfg = compose(config_name="config")
 
     daily_output_dir = path_from_cfg(cfg, "daily_output_dir")
-    company_info_path = path_from_cfg(cfg, "company_info_parquet")
+    company_info_path = path_from_cfg(cfg, "company_info_path")
     last_seq_path = path_from_cfg(cfg, "last_seq_file")
     log_dir = path_from_cfg(cfg, "log_dir")
 
@@ -98,7 +98,7 @@ async def run_daily_batch():
     logger.info("========== 일배치 시작 (%s) ==========", today_str)
     cleanup_old_output_dirs(daily_output_dir)
 
-    news_source_parquet = path_from_cfg(cfg, "news_source_parquet")
+    news_source_path = path_from_cfg(cfg, "news_source_path")
     target_parquet_path = resolve_target_parquet_path(cfg)
 
     today_dir = os.path.join(daily_output_dir, today_str)
@@ -115,8 +115,8 @@ async def run_daily_batch():
 
     dump_size = 0
     if not os.path.exists(raw_parquet_path):
-        logger.info("신규 뉴스 데이터 원천 parquet에서 로드 중: %s", news_source_parquet)
-        news_df = load_recent_news_from_parquet(news_source_parquet, last_seq, last_part_basc_dt)
+        logger.info("신규 뉴스 데이터 원천 파일에서 로드 중: %s", news_source_path)
+        news_df = load_recent_news(news_source_path, last_seq, last_part_basc_dt)
 
         if news_df.empty:
             logger.info("신규 뉴스가 없습니다 (증분 필터 결과 0건). 배치를 종료합니다.")
@@ -180,8 +180,7 @@ async def run_daily_batch():
     # 4. 기업 매핑 및 DB 적재 (청크 단위)
     logger.info("[2단계] 기업 매핑 및 DB 적재 시작...")
     logger.info("최신 기업 데이터 로드 중...")
-    # companies_df = fetch_data(cfg, get_companies_data(table=companies_table))
-    companies_df = pd.read_parquet(company_info_path, engine="pyarrow")
+    companies_df = load_company_info(company_info_path)
     companies_df = keep_latest_per_cust_no(companies_df)
     companies_df = rename_companies_df_columns(companies_df)
     companies_df_copy = companies_df.copy()
