@@ -53,6 +53,18 @@ COLUMNS = [
 ]
 
 
+def cleanup_wf_input_csvs(news_source_path: str, company_info_path: str) -> None:
+    """배치 완료 후 WF가 drop한 input CSV만 삭제 (parquet 등은 제외)."""
+    for label, path in [("뉴스", news_source_path), ("기업", company_info_path)]:
+        if os.path.splitext(path)[1].lower() != ".csv":
+            logger.info("WF %s 입력 삭제 생략 (CSV 아님): %s", label, path)
+            continue
+        if os.path.isfile(path):
+            os.remove(path)
+            logger.info("WF %s 입력 CSV 삭제 완료: %s", label, path)
+        else:
+            logger.warning("WF %s 입력 CSV 없음 (삭제 생략): %s", label, path)
+
 
 def run_dry_run(final_df: pd.DataFrame, chunk_idx: int) -> None:
     """DRY_RUN 모드: DB 적재 없이 결과를 로그로 출력하고 종료."""
@@ -120,6 +132,7 @@ async def run_daily_batch():
 
         if news_df.empty:
             logger.info("신규 뉴스가 없습니다 (증분 필터 결과 0건). 배치를 종료합니다.")
+            cleanup_wf_input_csvs(news_source_path, company_info_path)
             return
 
         dump_size = len(news_df)
@@ -183,6 +196,12 @@ async def run_daily_batch():
     companies_df = load_company_info(company_info_path)
     companies_df = keep_latest_per_cust_no(companies_df)
     companies_df = rename_companies_df_columns(companies_df)
+    if not companies_df.empty:
+        preview = companies_df[["cust_no", "cust_nm"]].head(3)
+        logger.info(
+            "기업 마스터 샘플 (cust_nm 마스킹 해제 확인용, 3건):\n%s",
+            preview.to_string(index=False),
+        )
     companies_df_copy = companies_df.copy()
     # 매핑을 위해 clean_cust_nm 컬럼 추가
     companies_df["clean_cust_nm"] = companies_df["cust_nm"].apply(normalize_company_name)
@@ -270,6 +289,8 @@ async def run_daily_batch():
     # 6. 공유 공간 SQLite export (output/target parquet → .db)
     target_sqlite_path = path_from_cfg(cfg, "target_sqlite_path")
     export_parquet_to_sqlite(target_parquet_path, target_sqlite_path)
+
+    cleanup_wf_input_csvs(news_source_path, company_info_path)
 
     elapsed = time.time() - start_time
     logger.info(
