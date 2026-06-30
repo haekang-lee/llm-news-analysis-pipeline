@@ -37,6 +37,34 @@ class RemoteAPIEmbeddings(Embeddings):
         return self.embed_documents([text])[0]
 
 
+def _load_local_embedding(cfg):
+    from langchain_huggingface import HuggingFaceEmbeddings
+
+    logger.info(
+        "임베딩 백엔드: local (%s, device=%s)",
+        cfg.dev.paths.embedding_model,
+        cfg.dev.system.device,
+    )
+    return HuggingFaceEmbeddings(
+        model_name=cfg.dev.paths.embedding_model,
+        model_kwargs={"device": cfg.dev.system.device},
+        encode_kwargs={
+            "normalize_embeddings": True,
+            "batch_size": cfg.dev.params.embed_batch_size,
+        },
+    )
+
+
+def _load_api_embedding(cfg):
+    emb_cfg = cfg.serve.embedding
+    return RemoteAPIEmbeddings(
+        base_url=emb_cfg.url,
+        model=emb_cfg.model,
+        api_key=emb_cfg.get("api_key", "EMPTY"),
+        batch_size=cfg.dev.params.embed_batch_size,
+    )
+
+
 def load_embedding_model(cfg):
     """
     cfg.dev.embedding_mode 에 따라 임베딩 백엔드를 선택.
@@ -48,21 +76,22 @@ def load_embedding_model(cfg):
     if mode == "api":
         emb_cfg = cfg.serve.embedding
         logger.info("임베딩 백엔드: API (%s, model=%s)", emb_cfg.url, emb_cfg.model)
-        return RemoteAPIEmbeddings(
-            base_url=emb_cfg.url,
-            model=emb_cfg.model,
-            api_key=emb_cfg.get("api_key", "EMPTY"),
-            batch_size=cfg.dev.params.embed_batch_size,
-        )
+        return _load_api_embedding(cfg)
 
-    from langchain_huggingface import HuggingFaceEmbeddings
+    return _load_local_embedding(cfg)
 
-    logger.info("임베딩 백엔드: local (%s, device=%s)", cfg.dev.paths.embedding_model, cfg.dev.system.device)
-    return HuggingFaceEmbeddings(
-        model_name=cfg.dev.paths.embedding_model,
-        model_kwargs={"device": cfg.dev.system.device},
-        encode_kwargs={
-            "normalize_embeddings": True,
-            "batch_size": cfg.dev.params.embed_batch_size,
-        },
-    )
+
+def load_embedding_model_for_rebuild(cfg):
+    """
+    기업 마스터 변경 등 vector db cold-start 시: API 우선, 실패 시 로컬 fallback.
+    """
+    emb_cfg = cfg.serve.embedding
+    logger.info("vector db 재생성 — 임베딩 API 우선 시도 (%s, model=%s)", emb_cfg.url, emb_cfg.model)
+    try:
+        api_emb = _load_api_embedding(cfg)
+        api_emb.embed_query("probe")
+        logger.info("임베딩 API 사용 (cold-start)")
+        return api_emb
+    except Exception as e:
+        logger.warning("임베딩 API 사용 불가 → 로컬 모델 fallback: %s", e)
+        return _load_local_embedding(cfg)
