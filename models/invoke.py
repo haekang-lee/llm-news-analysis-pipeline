@@ -28,5 +28,4 @@ async def invoke_api(cfg: DictConfig, prompt: str, system_prompt: str) -> str:
         except Exception as e:
             return f"Failure: API calling: {e}"
 
-    
 
