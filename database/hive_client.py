@@ -116,13 +116,16 @@ def insert_dataframe_with_id(
     DB의 현재 MAX(id_column)을 조회한 뒤,
     이어지는 순번을 DataFrame 첫 컬럼에 붙여서 배치 INSERT.
     """
+    from database.parquet_store import prepare_target_df
     from queries.sql_queries import get_max_news_mppg_id
 
     max_id_df = fetch_data(cfg, get_max_news_mppg_id(table))
     max_id = int(max_id_df["max_id"].iloc[0] or 0)
 
-    df = df.reset_index(drop=True)
-    df.insert(0, id_column, range(max_id + 1, max_id + 1 + len(df)))
+    df = prepare_target_df(df)
+    df[id_column] = range(max_id + 1, max_id + 1 + len(df))
+    from database.schema import TARGET_COLUMNS
+    df = df[TARGET_COLUMNS]
 
     if verbose:
         logger.info("현재 MAX(%s) = %s  →  %s 부터 부여", id_column, f"{max_id:,}", f"{max_id + 1:,}")
