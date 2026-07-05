@@ -37,6 +37,49 @@ class RemoteAPIEmbeddings(Embeddings):
         return self.embed_documents([text])[0]
 
 
+class FallbackEmbeddings(Embeddings):
+    """
+    매핑용 임베딩: API 우선 호출, 실패 시 로컬 모델로 전환(세션 내 유지).
+    FAISS 쿼리·동명이인 해소(process_one_chunk)에서 사용.
+    """
+
+    def __init__(self, cfg):
+        self._cfg = cfg
+        self._api: Embeddings | None = None
+        self._local: Embeddings | None = None
+        self._use_local = False
+        emb_cfg = cfg.serve.embedding
+        logger.info(
+            "임베딩 백엔드 (매핑): API 우선 (%s, model=%s), 실패 시 local fallback",
+            emb_cfg.url,
+            emb_cfg.model,
+        )
+
+    def _api_backend(self) -> Embeddings:
+        if self._api is None:
+            self._api = _load_api_embedding(self._cfg)
+        return self._api
+
+    def _local_backend(self) -> Embeddings:
+        if self._local is None:
+            logger.warning("임베딩 API 사용 불가 → 로컬 모델 fallback (매핑)")
+            self._local = _load_local_embedding(self._cfg)
+        return self._local
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        if self._use_local:
+            return self._local_backend().embed_documents(texts)
+        try:
+            return self._api_backend().embed_documents(texts)
+        except Exception as e:
+            logger.warning("임베딩 API 실패 → 로컬 fallback (매핑): %s", e)
+            self._use_local = True
+            return self._local_backend().embed_documents(texts)
+
+    def embed_query(self, text: str) -> List[float]:
+        return self.embed_documents([text])[0]
+
+
 def _load_local_embedding(cfg):
     from langchain_huggingface import HuggingFaceEmbeddings
 
@@ -81,17 +124,31 @@ def load_embedding_model(cfg):
     return _load_local_embedding(cfg)
 
 
+def load_embedding_model_for_mapping(cfg):
+    """
+    기업명 매핑(벡터 검색·동명이인 해소)용 임베딩.
+    - embedding_mode=api: API 우선, 실패 시 로컬 fallback
+    - embedding_mode=local: 로컬 모델
+    """
+    mode = str(cfg.dev.get("embedding_mode", "local")).lower()
+    if mode != "api":
+        return _load_local_embedding(cfg)
+    return FallbackEmbeddings(cfg)
+
+
 def load_embedding_model_for_rebuild(cfg):
     """
-    기업 마스터 변경 등 vector db cold-start 시: API 우선, 실패 시 로컬 fallback.
+    vector db cold-start / 재생성 시 사용할 임베딩 백엔드.
+    - embedding_mode=api: API probe 성공 시에만 반환 (실패 시 예외 — 로컬 재빌드 없음)
+    - embedding_mode=local: 로컬 모델 (개발용)
     """
-    emb_cfg = cfg.serve.embedding
-    logger.info("vector db 재생성 — 임베딩 API 우선 시도 (%s, model=%s)", emb_cfg.url, emb_cfg.model)
-    try:
-        api_emb = _load_api_embedding(cfg)
-        api_emb.embed_query("probe")
-        logger.info("임베딩 API 사용 (cold-start)")
-        return api_emb
-    except Exception as e:
-        logger.warning("임베딩 API 사용 불가 → 로컬 모델 fallback: %s", e)
+    mode = str(cfg.dev.get("embedding_mode", "local")).lower()
+    if mode != "api":
         return _load_local_embedding(cfg)
+
+    emb_cfg = cfg.serve.embedding
+    logger.info("vector db 재생성 — 임베딩 API 시도 (%s, model=%s)", emb_cfg.url, emb_cfg.model)
+    api_emb = _load_api_embedding(cfg)
+    api_emb.embed_query("probe")
+    logger.info("임베딩 API 사용 (vector db 재생성)")
+    return api_emb
