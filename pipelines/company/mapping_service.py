@@ -11,9 +11,9 @@ logging.getLogger("torchvision").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.docstore.document import Document
 from sklearn.metrics.pairwise import cosine_similarity
+from models.embedding import load_embedding_model_for_mapping, load_embedding_model_for_rebuild
 
 
 def normalize_company_name(name):
@@ -41,24 +41,37 @@ def normalize_company_name(name):
     return name.strip().lower()
 
 
-def build_or_load_company_vector_db(cfg, companies_df, vector_db_path: str):
-    # 동명이인 해소를 위해 embedding_model을 리턴해야 하므로 미리 생성
-    embeddings = HuggingFaceEmbeddings(
-        model_name=cfg.dev.paths.embedding_model,
-        model_kwargs={"device": cfg.dev.system.device},
-        encode_kwargs={
-            "normalize_embeddings": True,
-            "batch_size": cfg.dev.params.embed_batch_size,
-        },
-    )
-    
-    if os.path.exists(vector_db_path):
-        try:
-            db = FAISS.load_local(vector_db_path, embeddings, allow_dangerous_deserialization=True)
-            return db, embeddings
-        except Exception as e:
-            logger.warning("기존 vector db 로드 실패: %s → 재생성", e)
+def _company_fingerprint(companies_df) -> str:
+    """회사 마스터의 (cust_no) 집합을 해시. 마스터가 바뀌면 값도 바뀐다."""
+    import hashlib
 
+    keys = companies_df["cust_no"].astype(str).tolist()
+    digest = hashlib.md5("\n".join(sorted(keys)).encode("utf-8")).hexdigest()
+    return f"{len(keys)}:{digest}"
+
+
+def _read_cached_fingerprint(vector_db_path: str) -> str | None:
+    fingerprint_path = os.path.join(vector_db_path, "company_fingerprint.txt")
+    if not os.path.exists(fingerprint_path):
+        return None
+    with open(fingerprint_path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def _vector_db_exists(vector_db_path: str) -> bool:
+    if not os.path.isdir(vector_db_path):
+        return False
+    return all(
+        os.path.exists(os.path.join(vector_db_path, name))
+        for name in ("index.faiss", "index.pkl")
+    )
+
+
+def _load_vector_db(vector_db_path: str, embeddings):
+    return FAISS.load_local(vector_db_path, embeddings, allow_dangerous_deserialization=True)
+
+
+def _company_documents(companies_df):
     docs = []
     for _, row in companies_df.iterrows():
         original_name = str(row["cust_nm"])
@@ -73,10 +86,103 @@ def build_or_load_company_vector_db(cfg, companies_df, vector_db_path: str):
                 },
             )
         )
+    return docs
 
-    db = FAISS.from_documents(docs, embeddings)
-    db.save_local(vector_db_path)
+
+def _reuse_existing_vector_db(vector_db_path, embeddings, reason: str, cached_fp, fingerprint):
+    db = _load_vector_db(vector_db_path, embeddings)
+    logger.info(
+        "기존 vector db 재사용 (%s): %s (캐시 fingerprint=%s, 현재=%s)",
+        reason,
+        vector_db_path,
+        cached_fp,
+        fingerprint,
+    )
     return db, embeddings
+
+
+def _finalize_new_vector_db(
+    vector_db_path: str,
+    db,
+    fingerprint: str,
+    fingerprint_path: str,
+    mapping_embeddings,
+):
+    """from_documents 직후 FAISS 쿼리 임베딩을 매핑용으로 교체하고 저장."""
+    db.embedding_function = mapping_embeddings
+    db.save_local(vector_db_path)
+    with open(fingerprint_path, "w", encoding="utf-8") as f:
+        f.write(fingerprint)
+    logger.info("vector db 저장 완료: %s", vector_db_path)
+    return db, mapping_embeddings
+
+
+def build_or_load_company_vector_db(cfg, companies_df, vector_db_path: str):
+    fingerprint = _company_fingerprint(companies_df)
+    fingerprint_path = os.path.join(vector_db_path, "company_fingerprint.txt")
+    has_cache = _vector_db_exists(vector_db_path)
+    cached_fp = _read_cached_fingerprint(vector_db_path) if has_cache else None
+    rebuild = cached_fp != fingerprint
+    cache_usable = True
+
+    if not rebuild and has_cache:
+        mapping_embeddings = load_embedding_model_for_mapping(cfg)
+        try:
+            return _reuse_existing_vector_db(
+                vector_db_path,
+                mapping_embeddings,
+                reason="회사 마스터 동일",
+                cached_fp=cached_fp,
+                fingerprint=fingerprint,
+            )
+        except Exception as e:
+            logger.warning("기존 vector db 로드 실패: %s → 재생성 시도", e)
+            rebuild = True
+            cache_usable = False
+
+    if rebuild:
+        if cached_fp is not None and cached_fp != fingerprint:
+            logger.info("회사 마스터 변경 감지 → vector db 재생성")
+        elif cached_fp is None and has_cache:
+            logger.info("fingerprint 없음 → vector db 재생성")
+
+        try:
+            build_embeddings = load_embedding_model_for_rebuild(cfg)
+        except Exception as e:
+            if has_cache and cache_usable:
+                logger.warning(
+                    "임베딩 API로 vector db 재생성 불가 → 기존 인덱스 유지 "
+                    "(마스터 변경 미반영, 로컬 재빌드 생략): %s",
+                    e,
+                )
+                mapping_embeddings = load_embedding_model_for_mapping(cfg)
+                return _reuse_existing_vector_db(
+                    vector_db_path,
+                    mapping_embeddings,
+                    reason="API 실패",
+                    cached_fp=cached_fp,
+                    fingerprint=fingerprint,
+                )
+            raise RuntimeError(
+                "임베딩 API로 vector db를 생성할 수 없고, 재사용할 캐시도 없습니다. "
+                f"원인: {e}"
+            ) from e
+
+        logger.info("vector db 생성 중 (회사 %s건 임베딩)...", f"{len(companies_df):,}")
+        mapping_embeddings = load_embedding_model_for_mapping(cfg)
+        db = FAISS.from_documents(_company_documents(companies_df), build_embeddings)
+        return _finalize_new_vector_db(
+            vector_db_path, db, fingerprint, fingerprint_path, mapping_embeddings
+        )
+
+    # 최초 생성 (캐시 없음)
+    build_embeddings = load_embedding_model_for_rebuild(cfg)
+    logger.info("vector db 생성 중 (회사 %s건 임베딩)...", f"{len(companies_df):,}")
+    mapping_embeddings = load_embedding_model_for_mapping(cfg)
+    db = FAISS.from_documents(_company_documents(companies_df), build_embeddings)
+    return _finalize_new_vector_db(
+        vector_db_path, db, fingerprint, fingerprint_path, mapping_embeddings
+    )
 
 
 def resolve_homonyms(df, embedding_model):
@@ -218,5 +324,11 @@ def process_one_chunk(
 
     if not final_resolved_df.empty:
         final_resolved_df = final_resolved_df.merge(companies_df_copy, on=["cust_no", "cust_nm"], how="left")
+
+    # 한 기사(seq)에서 같은 기업(cust_no)이 여러 표기로 추출돼 동일 행이 중복 생성되는 것을 방지.
+    # (seq, cust_no) 단위로 1건만 유지 — doc_sentiment/news_clas 등은 뉴스 단위라 값이 갈리지 않음.
+    if not final_resolved_df.empty and {"seq", "cust_no"}.issubset(final_resolved_df.columns):
+        final_resolved_df = final_resolved_df.drop_duplicates(subset=["seq", "cust_no"], keep="first")
+
     return final_resolved_df
 
