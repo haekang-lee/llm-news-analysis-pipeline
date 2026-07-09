@@ -2,7 +2,9 @@
 __pycache__/
 *.parquet
 *.parquet.tmp
+*.ipynb
 temp/
+scripts/
 output/
 archive/
 .vscode/
