@@ -6,6 +6,8 @@
 
 증분 처리(`seq`·`part_basc_dt`)와 청크 단위 중간 저장으로 장시간 배치에서도 **재시작**할 수 있도록 설계했습니다. 상세 설계는 [ARCHITECTURE.md](./ARCHITECTURE.md)를 참고하세요.
 
+내부 구성원용 운영 가이드(동작 원리를 비개발자도 이해할 수 있게 정리 + 장애 대응 Runbook)는 [docs/pipeline-guide.md](./docs/pipeline-guide.md)를 참고하세요.
+
 ## What it does
 
 - **증분 로드**: WF CSV/parquet에서 신규 뉴스만 읽어 `raw_news` parquet 저장
