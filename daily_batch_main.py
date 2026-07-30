@@ -256,7 +256,7 @@ async def run_daily_batch():
             ].copy()
 
         chunk_mapped = len(mapped_df) if mapped_df is not None and not mapped_df.empty else 0
-        chunk_insert = len(final_df)
+        # chunk_insert = len(final_df)
         total_mapped += chunk_mapped
         logger.info("[매핑] 청크 %d — 기업 매핑 성공: %s건", chunk_idx, f"{chunk_mapped:,}")
 
