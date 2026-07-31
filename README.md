@@ -15,16 +15,45 @@
 - **매핑**: 기업명 정규화 → exact match → FAISS 유사 검색 → 동명이인 해소 → `(seq, cust_no)` dedup
 - **적재**: `essential` + `cust_no` 있는 건만 target parquet append → SQLite export (downstream용 필터 적용)
 
-## Flow
+## Architecture
 
+```mermaid
+flowchart TB
+    subgraph WF["① WF 입력 (공유 경로)"]
+        NEWS["뉴스 원본<br/>recent_news.csv/parquet"]
+        CO["기업 마스터<br/>company_info.csv/parquet"]
+    end
+
+    subgraph BATCH["② daily_batch_main.py — 일 1회 배치"]
+        LOAD["증분 로드<br/>신규 seq만"]
+        EXT["LLM 추출<br/>기업명·분류·카테고리·요약"]
+        MAP["기업 매핑<br/>exact → FAISS → 동명이인 해소"]
+        APP["적재<br/>essential + cust_no만 append"]
+        LOAD --> EXT --> MAP --> APP
+    end
+
+    subgraph EMB["③ 임베딩 (용도별 이원화)"]
+        REBUILD["인덱스 생성·재생성<br/>API 전용 (실패 시 구캐시 유지)"]
+        VDB[("FAISS 인덱스<br/>company_vector_db/")]
+        FALLBACK["매핑 쿼리 임베딩<br/>API 우선 → 로컬 fallback"]
+        REBUILD -->|from_documents| VDB --> FALLBACK
+    end
+
+    subgraph OUT["④ 산출물"]
+        TGT[("target parquet<br/>NEWS_CO_MPPG.parquet<br/>(전건 보존)")]
+        SQL[("SQLite<br/>downstream 필터본")]
+        SEQ["last_seq.json<br/>(증분 커서)"]
+    end
+
+    NEWS --> LOAD
+    CO --> MAP
+    CO -. 마스터 변경 감지 .-> REBUILD
+    FALLBACK --> MAP
+    APP --> TGT --> SQL
+    APP --> SEQ
 ```
-WF 입력 (recent_news, company_info)
-    → 증분 raw parquet
-    → LLM 추출 (extracted_parts/)
-    → 기업 매핑 (mapped_parts/) + FAISS 캐시
-    → output/target/NEWS_CO_MPPG.parquet (누적)
-    → paths.target_sqlite_path (.db)
-```
+
+더 상세한 단계별 표와 임베딩 분기 조건은 [ARCHITECTURE.md](./ARCHITECTURE.md)를 참고하세요.
 
 ## Stack
 
@@ -61,7 +90,7 @@ cp conf/config.example.yaml conf/config.yaml
 | `paths.news_source_path` | WF 뉴스 파일 (CSV: `\x01` 필드 / `\|\|` 레코드, 또는 parquet) |
 | `paths.company_info_path` | 기업 마스터 |
 | `paths.target_sqlite_path` | downstream SQLite 경로 |
-| `serve.online.*` | LLM 서빙 URL |
+| `serve.online.*` | LLM 서빙 `base_url`·`model`·`api_key` |
 | `serve.embedding.*` | 임베딩 API (`dev.embedding_mode=api`) |
 
 ### 2. 실행
