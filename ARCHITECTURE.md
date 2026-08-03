@@ -235,8 +235,8 @@ raw_news parquet
 
 ### 6.3 `models/invoke.py`
 
-- `AsyncOpenAI(base_url=serve.online.url + serve.online.model)`
-- `responses.create()` — instructions / input, reasoning effort
+- `AsyncOpenAI(base_url=serve.online.base_url, api_key=serve.online.api_key)`
+- `responses.create(model=serve.online.model, ...)` — instructions / input, reasoning effort
 
 ---
 
@@ -381,7 +381,7 @@ API 장애 시 매핑은 **느려질 수 있으나** 중단되지 않도록 설�
 |------|------|
 | `paths.*` | WF 입력, target, daily 출력, vector DB, checkpoint, log |
 | `batch.*` | chunk, concurrency, threshold, dry_run |
-| `serve.online.*` | LLM URL, model, temperature, reasoning |
+| `serve.online.*` | LLM `base_url`, `model`, `api_key`, temperature, reasoning |
 | `serve.embedding.*` | GPU 임베딩 API (OpenAI 호환 `/embeddings`) |
 | `dev.embedding_mode` | `api` \| `local` |
 | `dev.paths.embedding_model` | local / fallback용 HuggingFace 경로 |
@@ -461,5 +461,6 @@ Hive 보조: `scripts/hive_config.py`가 `config.yaml` + 선택 `conf/hive.yaml`
 ## 16. 관련 문서
 
 - [README.md](./README.md) — 프로젝트 소개 (일부 Hive 중심 설명은 레거시, 본 문서 우선)
+- [docs/pipeline-guide.md](./docs/pipeline-guide.md) — 내부 구성원용 운영 가이드 (동작 원리 + 장애 대응 Runbook)
 - [conf/config.example.yaml](./conf/config.example.yaml) — 설정 템플릿
 - [prompts/news_prompt.example.py](./prompts/news_prompt.example.py) — LLM 출력 스키마
