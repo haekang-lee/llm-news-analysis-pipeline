@@ -99,7 +99,7 @@ cp conf/config.example.yaml conf/config.yaml
 python daily_batch_main.py
 ```
 
-Blueprint 등 외부 WF에서:
+WF에서:
 
 ```python
 from daily_batch_main import main
