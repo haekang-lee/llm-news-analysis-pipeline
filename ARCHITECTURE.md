@@ -33,7 +33,7 @@
 ### 1.4 배포·실행
 
 - **진입점**: `daily_batch_main.py` → `main()` → `asyncio.run(run_daily_batch())`
-- **외부 호출**: Blueprint 등 WF에서 `from daily_batch_main import main` 후 `main()` 호출
+- **외부 호출**: WF에서 `from daily_batch_main import main` 후 `main()` 호출
 - **설정**: Hydra `compose(config_name="config")`, CWD 무관 (`project_root()/conf` 기준)
 
 ---
