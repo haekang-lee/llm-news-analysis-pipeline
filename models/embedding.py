@@ -108,22 +108,6 @@ def _load_api_embedding(cfg):
     )
 
 
-def load_embedding_model(cfg):
-    """
-    cfg.dev.embedding_mode 에 따라 임베딩 백엔드를 선택.
-      - "api"   : 원격 GPU 임베딩 서버(OpenAI 호환) 호출
-      - "local" : 로컬 HuggingFace 모델 직접 로드 (기본값)
-    """
-    mode = str(cfg.dev.get("embedding_mode", "local")).lower()
-
-    if mode == "api":
-        emb_cfg = cfg.serve.embedding
-        logger.info("임베딩 백엔드: API (%s, model=%s)", emb_cfg.url, emb_cfg.model)
-        return _load_api_embedding(cfg)
-
-    return _load_local_embedding(cfg)
-
-
 def load_embedding_model_for_mapping(cfg):
     """
     기업명 매핑(벡터 검색·동명이인 해소)용 임베딩.
