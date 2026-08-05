@@ -1,0 +1,42 @@
+# conf/config.yaml 템플릿 — 복사 후 serve/paths 등 실제 값을 채우세요.
+# Hive 보조 스크립트는 conf/hive.example.yaml → hive.yaml 참고
+
+paths:
+  news_source_path: "input/recent_news.csv"     # WF 뉴스 (CSV: \x01 / ||, 또는 parquet/디렉터리)
+  company_info_path: "input/company_info.csv"   # WF 기업 마스터 (CSV/parquet/디렉터리)
+  target_parquet_dir: "output/target"
+  target_parquet_file: "NEWS_CO_MPPG.parquet"   # 누적 결과 parquet 파일명
+  target_sqlite_path: "/path/to/shared/NEWS_CO_MPPG.db"
+  daily_output_dir: "output/daily_batch"
+  vector_db_dir: "output/company_vector_db"   # 회사 벡터 DB 캐시 (날짜 무관, 마스터 동일 시 재사용)
+  last_seq_file: "output/checkpoint/last_seq.json"
+  log_dir: "log/files"
+
+batch:
+  chunk_size: 1000              # parquet 읽기·처리 단위
+  concurrent_limit: 50          # LLM 동시 호출 수
+  similarity_threshold: 0.9     # FAISS 유사 검색 매칭 임계값
+  dry_run: false                # true: 적재 전 미리보기 후 종료
+
+serve:
+  online:                       # 뉴스 분석 LLM (OpenAI 호환)
+    base_url: "http://<llm-host>:8000/v1"
+    model: "gpt-oss-120b-dev"
+    api_key: "EMPTY"            # 게이트웨이 인증이 필요 없으면 "EMPTY"
+    reasoning: low
+    max_output_tokens: 8192
+    temperature: 0.2
+    top_p: 1.0
+  embedding:                    # 임베딩 엔드포인트 (dev.embedding_mode=api 일 때 사용)
+    url: "http://<embedding-host>:8080"
+    model: "/models"
+    api_key: "EMPTY"
+
+dev:
+  embedding_mode: "api"         # api: 원격 GPU 서버 호출 / local: 로컬 모델 로드
+  paths:
+    embedding_model: "/path/to/models/bge-m3"   # local 모드일 때만 필요
+  system:
+    device: "cpu"               # local 모드: cuda 또는 cpu
+  params:
+    embed_batch_size: 64
